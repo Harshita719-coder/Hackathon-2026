@@ -2,3 +2,5 @@ pandas
 numpy
 streamlit
 openai
+python-dotenv
+plotly

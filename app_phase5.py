@@ -322,12 +322,12 @@ Write exactly 2 short sentences in simple English:
 """
 
     try:
-        response = client.responses.create(
+        response = client.chat.completions.create(
             model="gpt-4.1-mini",
-            input=prompt,
+            messages=[{"role": "user", "content": prompt}],
         )
 
-        text = response.output_text.strip()
+        text = response.choices[0].message.content.strip()
 
         if text:
             return text

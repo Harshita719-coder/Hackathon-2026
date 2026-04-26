@@ -1,3 +1,4 @@
+import copy
 import os
 import time
 import json
@@ -1047,40 +1048,36 @@ def show_attempt_workflow(history):
         else:
             pill = f'<span class="pill-blue">{h["failure_type"]}</span>'
 
-        st.markdown('<div class="attempt-card">', unsafe_allow_html=True)
-        st.markdown(
-            f"""
-            <div class="attempt-title">Attempt {h["attempt"]}</div>
-            {pill}
-            <div class="small-muted">Cloud status: {h["cloud_status"]}</div>
-            """,
-            unsafe_allow_html=True,
-        )
+        with st.container(border=True):
+            st.markdown(
+                f"""
+                <div class="attempt-title">Attempt {h["attempt"]}</div>
+                {pill}
+                <div class="small-muted">Cloud status: {h["cloud_status"]}</div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-        c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+            c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
 
-        with c1:
-            st.metric("Yield", f'{h["yield_percent"]}%')
+            with c1:
+                st.metric("Yield", f'{h["yield_percent"]}%')
 
-        with c2:
-            st.metric("Change", h.get("change_label", "Starting point"))
+            with c2:
+                st.metric("Change", h.get("change_label", "Starting point"))
 
-        with c3:
-            st.metric("% Increase", f'{h.get("percent_increase_from_previous", 0.0)}%')
+            with c3:
+                st.metric("% Increase", f'{h.get("percent_increase_from_previous", 0.0)}%')
 
-        with c4:
-            st.write("**Agent decision**")
-            st.write(h["recovery_reason"])
+            with c4:
+                st.write("**Agent decision**")
+                st.write(h["recovery_reason"])
 
-        with st.expander(f"Protocol used in Attempt {h['attempt']}"):
-            st.json(h["protocol"])
-
-        st.markdown("</div>", unsafe_allow_html=True)
+            with st.expander(f"Protocol used in Attempt {h['attempt']}"):
+                st.json(h["protocol"])
 
 
 def show_story_panel(history):
-    columns = st.columns(4)
-
     cards = []
 
     cards.append(
@@ -1113,16 +1110,20 @@ def show_story_panel(history):
 
     final = history[-1]
 
-    cards.append(
-        {
-            "title": "Final",
-            "yield": final["yield_percent"],
-            "label": final["failure_type"],
-            "note": final["diagnosis"],
-        }
-    )
+    if final["attempt"] != history[0]["attempt"]:
+        cards.append(
+            {
+                "title": "Final",
+                "yield": final["yield_percent"],
+                "label": final["failure_type"],
+                "note": final["diagnosis"],
+            }
+        )
 
-    for i, card in enumerate(cards[:4]):
+    cards = cards[:4]
+    columns = st.columns(len(cards))
+
+    for i, card in enumerate(cards):
         with columns[i]:
             if card["label"] == "success":
                 pill = '<span class="pill-green">success</span>'
@@ -1272,7 +1273,7 @@ if run_button:
         time.sleep(0.8)
 
         if use_demo_mode or train_df is None:
-            st.session_state.history = add_progress_metrics(FALLBACK_HISTORY.copy())
+            st.session_state.history = add_progress_metrics(copy.deepcopy(FALLBACK_HISTORY))
             st.session_state.importance = FALLBACK_IMPORTANCE
         else:
             history, importance = run_live_campaign(

@@ -2,7 +2,7 @@
 
 An AI-powered lab optimization loop that autonomously diagnoses and recovers failed chemical synthesis experiments. Built for the SCSP Hackathon 2026.
 
-**Live demo:** https://hackathon-2026-fyjwhwzabub4sfp2ckj4mh.streamlit.app/
+**Live demo:** https://hackathon-2026-8h29pqvfwqrqpa9nxmfpel.streamlit.app/
 
 ---
 

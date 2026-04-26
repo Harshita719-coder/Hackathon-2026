@@ -11,6 +11,7 @@ load_dotenv()
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 try:
@@ -46,10 +47,6 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    .main {
-        background-color: #f8fafc;
-    }
-
     .hero {
         padding: 1.7rem 1.8rem;
         border-radius: 24px;
@@ -112,7 +109,7 @@ st.markdown(
         background: white;
         border: 1px solid #e2e8f0;
         box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
-        height: 145px;
+        min-height: 130px;
     }
 
     .metric-label {
@@ -188,7 +185,7 @@ st.markdown(
     .workflow-number {
         width: 34px;
         height: 34px;
-        display: inline-flex;
+        display: flex;
         align-items: center;
         justify-content: center;
         border-radius: 999px;
@@ -1021,18 +1018,72 @@ def show_cloud_lab_steps():
 
 
 def show_iteration_yield_graph(history, success_threshold):
-    progress_df = build_iteration_progress_table(history)
+    attempts = [h["attempt"] for h in history]
+    yields = [h["yield_percent"] for h in history]
 
-    chart_df = progress_df.set_index("Attempt")[["Yield %", "% Increase From Previous"]]
-
-    st.line_chart(chart_df)
-
-    st.caption(
-        "This graph shows every autonomous attempt, the measured yield, "
-        "and the percent increase compared with the previous attempt."
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=attempts,
+        y=yields,
+        mode="lines+markers",
+        name="Measured yield %",
+        line=dict(color="#0f766e", width=2.5),
+        marker=dict(size=9, color="#0f766e"),
+        hovertemplate="Attempt %{x}<br>Yield: %{y:.1f}%<extra></extra>",
+    ))
+    fig.add_hline(
+        y=success_threshold,
+        line_dash="dash",
+        line_color="#f59e0b",
+        annotation_text=f"{int(success_threshold)}% target",
+        annotation_position="top left",
     )
+    fig.update_layout(
+        xaxis_title="Attempt",
+        yaxis_title="Yield %",
+        yaxis=dict(range=[0, 100]),
+        height=300,
+        margin=dict(l=10, r=10, t=30, b=40),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        showlegend=False,
+    )
+    fig.update_xaxes(tickvals=attempts, gridcolor="#e2e8f0")
+    fig.update_yaxes(gridcolor="#e2e8f0")
+    st.plotly_chart(fig, use_container_width=True)
 
+    progress_df = build_iteration_progress_table(history)
     st.dataframe(progress_df, use_container_width=True, hide_index=True)
+
+
+def show_importance_chart(importance):
+    if not importance:
+        st.warning("No importance values available.")
+        return
+
+    params = list(importance.keys())
+    scores = list(importance.values())
+
+    fig = go.Figure(go.Bar(
+        x=scores,
+        y=params,
+        orientation="h",
+        marker_color="#0f766e",
+        hovertemplate="%{y}: %{x:.1f}<extra></extra>",
+    ))
+    fig.update_layout(
+        xaxis_title="Yield spread (max − min avg)",
+        height=300,
+        margin=dict(l=10, r=10, t=30, b=40),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+    )
+    fig.update_xaxes(gridcolor="#e2e8f0")
+    fig.update_yaxes(gridcolor="#e2e8f0", autorange="reversed")
+    st.plotly_chart(fig, use_container_width=True)
+
+    top = params[0] if params else "unknown"
+    st.caption(f"**{top}** has the highest impact on yield in this dataset.")
 
 
 def show_attempt_workflow(history):
@@ -1169,27 +1220,27 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.markdown(
-    """
-    <div class="info-box">
-        <b>Problem solved:</b> Scientists waste time after failed reactions manually logging results,
-        comparing old experiments, diagnosing failures, and writing the next protocol.
-        This tool closes that loop by turning a low-yield result into the next cloud-lab work order.
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.markdown(
-    """
-    <div class="warning-box">
-        <b>Correct dataset scope:</b> This demo only uses <code>ligand</code>, <code>additive</code>,
-        <code>base</code>, and <code>aryl_halide</code>. It does not use temperature, solvent, time,
-        or catalyst loading because those fields are not in the uploaded CSV.
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+with st.expander("About this demo", expanded=st.session_state.get("history") is None):
+    st.markdown(
+        """
+        <div class="info-box">
+            <b>Problem solved:</b> Scientists waste time after failed reactions manually logging results,
+            comparing old experiments, diagnosing failures, and writing the next protocol.
+            This tool closes that loop by turning a low-yield result into the next cloud-lab work order.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        """
+        <div class="warning-box">
+            <b>Correct dataset scope:</b> This demo only uses <code>ligand</code>, <code>additive</code>,
+            <code>base</code>, and <code>aryl_halide</code>. It does not use temperature, solvent, time,
+            or catalyst loading because those fields are not in the uploaded CSV.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 df = None
@@ -1239,17 +1290,16 @@ with st.sidebar:
         aryl_options = sorted(train_df["aryl_halide"].dropna().unique().tolist())
         selected_aryl = st.selectbox("Target substrate / aryl_halide", aryl_options)
 
-        st.divider()
-        st.caption("Dataset Health")
-        st.write("Rows:", len(df))
-        st.write("Train rows:", len(train_df))
-        st.write("Mean yield:", round(float(df["yield"].mean()), 2))
-        st.write(
-            "Low yield <30%:", f"{round(float((df['yield'] < 30).mean() * 100), 2)}%"
-        )
-        st.write(
-            "High yield ≥80%:", f"{round(float((df['yield'] >= 80).mean() * 100), 2)}%"
-        )
+        with st.expander("Dataset Health"):
+            st.write("Rows:", len(df))
+            st.write("Train rows:", len(train_df))
+            st.write("Mean yield:", round(float(df["yield"].mean()), 2))
+            st.write(
+                "Low yield <30%:", f"{round(float((df['yield'] < 30).mean() * 100), 2)}%"
+            )
+            st.write(
+                "High yield ≥80%:", f"{round(float((df['yield'] >= 80).mean() * 100), 2)}%"
+            )
     else:
         selected_aryl = "Selected substrate"
         st.warning("CSV not found. Turn on Demo mode fallback.")
@@ -1319,6 +1369,10 @@ else:
 
 success = final_yield >= float(success_threshold)
 
+gain_sign = "+" if total_gain >= 0 else ""
+gain_color = "green" if total_gain >= 0 else "red"
+pct_sign = "+" if total_percent_gain >= 0 else ""
+
 c1, c2, c3, c4 = st.columns(4)
 
 with c1:
@@ -1353,8 +1407,8 @@ with c3:
         <div class="metric-card">
             <div class="metric-label">Yield Recovery</div>
             <div class="metric-value">{start_yield}% → {final_yield}%</div>
-            <span class="pill-green">+{round(total_gain, 2)} points</span>
-            <div class="metric-note">{round(total_percent_gain, 2)}% total increase</div>
+            <span class="pill-{gain_color}">{gain_sign}{round(total_gain, 2)} points</span>
+            <div class="metric-note">{pct_sign}{round(total_percent_gain, 2)}% total change</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1375,72 +1429,43 @@ with c4:
 
 
 # ============================================================
-# CLOUD LAB LOOP
-# ============================================================
-st.subheader("Autonomous Cloud Lab Workflow")
-show_cloud_lab_steps()
-
-
-# ============================================================
 # TABS
 # ============================================================
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    [
-        "Run Monitor",
-        "Protocol Delta",
-        "Scientist Notebook",
-        "Cloud Lab Handoff",
-        "Exports",
-    ]
-)
+tab1, tab2, tab3, tab4 = st.tabs(["Results", "Protocol Delta", "Notebook", "Exports"])
 
 
 with tab1:
+    st.subheader("Diagnosis Story")
+    show_story_panel(history)
+
+    st.divider()
+
     left, right = st.columns(2)
 
     with left:
-        st.subheader("Iteration Yield Progress")
+        st.subheader("Yield Progress")
         show_iteration_yield_graph(history, float(success_threshold))
 
     with right:
         st.subheader("Parameter Importance")
-
-        if importance:
-            importance_df = pd.DataFrame(
-                {
-                    "Parameter": list(importance.keys()),
-                    "Importance Score": list(importance.values()),
-                }
-            ).set_index("Parameter")
-
-            st.bar_chart(importance_df)
-        else:
-            st.warning("No importance values available.")
+        show_importance_chart(importance)
 
     st.divider()
     show_attempt_workflow(history)
-
-    st.divider()
-    st.subheader("Diagnosis Story")
-    show_story_panel(history)
 
 
 with tab2:
     st.subheader("Protocol Diff Table")
     st.caption(
-        "This is the main judge artifact: what changed, when it changed, and why the agent changed it."
+        "What changed, when it changed, and why the agent changed it."
     )
     show_protocol_diff(history)
 
 
 with tab3:
     st.subheader("Scientist Notebook")
-
     st.markdown(
-        """
-        This tab acts like an automatic lab notebook.
-        It records the protocol, yield result, diagnosis, and next recovery decision for every attempt.
-        """
+        "Automatic log of every attempt: protocol, yield, diagnosis, and recovery decision."
     )
 
     for h in history:
@@ -1474,25 +1499,17 @@ with tab3:
             st.markdown("**Recovery decision**")
             st.write(h["recovery_reason"])
 
-
-with tab4:
+    st.divider()
     st.subheader("Cloud Lab Handoff")
-
     st.markdown(
-        """
-        This section shows what would be sent to a cloud lab execution layer.
-        In this hackathon demo, the execution layer is the dataset oracle.
-        In a real lab, this JSON could become a robot queue item or technician work order.
-        """
+        "In a real lab, this JSON becomes a robot queue item or technician work order."
     )
 
     latest = history[-1]
-
     st.markdown("**Latest protocol JSON**")
     st.json(latest.get("protocol_json", {}))
 
     st.markdown("**Real deployment mapping**")
-
     deployment_df = pd.DataFrame(
         [
             {
@@ -1517,19 +1534,13 @@ with tab4:
             },
         ]
     )
-
     st.dataframe(deployment_df, use_container_width=True, hide_index=True)
 
 
-with tab5:
+with tab4:
     st.subheader("Exports")
-
     st.markdown(
-        """
-        These exports make the demo feel like a real workflow automation tool.
-        The CSV can act as a lab notebook or Airtable import.
-        The JSON can act as a cloud-lab work order.
-        """
+        "Download the lab notebook as CSV or the cloud-lab work order as JSON."
     )
 
     csv_bytes = build_lab_notebook_csv(history)
@@ -1559,23 +1570,3 @@ with tab5:
         use_container_width=True,
         hide_index=True,
     )
-
-
-# ============================================================
-# PHASE 5 CHECKLIST
-# ============================================================
-with st.expander("Phase 5 Reliability Checklist", expanded=True):
-    st.checkbox("Live campaign can run from CSV", value=train_df is not None)
-    st.checkbox("Demo fallback mode available", value=True)
-    st.checkbox("OpenAI used only for diagnosis explanation", value=True)
-    st.checkbox("No fake parameters used", value=True)
-    st.checkbox("Iteration graph shows every attempt and yield increase", value=True)
-    st.checkbox("Cloud lab handoff shown as protocol JSON", value=True)
-    st.checkbox(
-        "CSV/JSON exports available for Airtable or lab notebook workflow", value=True
-    )
-
-
-st.success(
-    "Demo ready: scientist selects substrate → cloud lab simulates run → agent diagnoses → recovery protocol is queued."
-)

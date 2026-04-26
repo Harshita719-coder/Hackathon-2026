@@ -4,12 +4,17 @@ import json
 from pathlib import Path
 from datetime import datetime
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 try:
     from openai import OpenAI
+
     OPENAI_AVAILABLE = True
 except Exception:
     OpenAI = None
@@ -479,7 +484,11 @@ class BHOracle:
             true_yield = float(exact["yield"].mean())
             source = "exact_train_match"
             confidence = 0.95
-            reaction_smiles = exact["reaction_SMILES"].iloc[0] if "reaction_SMILES" in exact.columns else None
+            reaction_smiles = (
+                exact["reaction_SMILES"].iloc[0]
+                if "reaction_SMILES" in exact.columns
+                else None
+            )
 
         else:
             fallback = self.train_df[
@@ -491,7 +500,11 @@ class BHOracle:
                 true_yield = float(fallback["yield"].mean())
                 source = "fallback_same_base_and_aryl_halide"
                 confidence = 0.65
-                reaction_smiles = fallback["reaction_SMILES"].iloc[0] if "reaction_SMILES" in fallback.columns else None
+                reaction_smiles = (
+                    fallback["reaction_SMILES"].iloc[0]
+                    if "reaction_SMILES" in fallback.columns
+                    else None
+                )
 
             else:
                 true_yield = float(self.train_df["yield"].mean())
@@ -550,7 +563,9 @@ class SimpleAnalyzer:
         return round(float(self.train_df["yield"].mean()), 2)
 
 
-def classify_failure(yield_percent, previous_yield=None, confidence=0.95, success_threshold=80.0):
+def classify_failure(
+    yield_percent, previous_yield=None, confidence=0.95, success_threshold=80.0
+):
     if confidence < 0.5:
         return "high_uncertainty"
 
@@ -604,7 +619,9 @@ def local_fallback_diagnosis(failure_type, top_parameter, ord_hint):
     return message
 
 
-def make_diagnosis(failure_type, top_parameter, ord_hint, protocol=None, yield_percent=None):
+def make_diagnosis(
+    failure_type, top_parameter, ord_hint, protocol=None, yield_percent=None
+):
     if protocol is not None and yield_percent is not None:
         ai_text = openai_diagnosis_agent(
             failure_type=failure_type,
@@ -622,8 +639,7 @@ def make_diagnosis(failure_type, top_parameter, ord_hint, protocol=None, yield_p
 
 def local_ord_hint(train_df, aryl_halide):
     subset = train_df[
-        (train_df["aryl_halide"] == aryl_halide)
-        & (train_df["yield"] >= 70)
+        (train_df["aryl_halide"] == aryl_halide) & (train_df["yield"] >= 70)
     ]
 
     if subset.empty:
@@ -673,7 +689,9 @@ def build_cloud_lab_protocol(attempt, protocol):
 
 
 def recover_next_protocol(train_df, analyzer, current_protocol, tried_protocols):
-    same_aryl = train_df[train_df["aryl_halide"] == current_protocol["aryl_halide"]].copy()
+    same_aryl = train_df[
+        train_df["aryl_halide"] == current_protocol["aryl_halide"]
+    ].copy()
 
     if same_aryl.empty:
         same_aryl = train_df.copy()
@@ -713,7 +731,10 @@ def recover_next_protocol(train_df, analyzer, current_protocol, tried_protocols)
         )
 
     if not scored:
-        return current_protocol, "No untried condition found. Retrying current condition."
+        return (
+            current_protocol,
+            "No untried condition found. Retrying current condition.",
+        )
 
     scored = sorted(scored, key=lambda x: x["predicted_yield"], reverse=True)
     best = scored[0]["protocol"]
@@ -794,7 +815,9 @@ def run_live_campaign(train_df, selected_aryl_halide, success_threshold, max_att
         history.append(row)
 
         if result["yield_percent"] >= success_threshold:
-            history[-1]["recovery_reason"] = "Success threshold reached. Campaign complete."
+            history[-1][
+                "recovery_reason"
+            ] = "Success threshold reached. Campaign complete."
             break
 
         if attempt == max_attempts:
@@ -865,7 +888,9 @@ def build_iteration_progress_table(history):
                 "Attempt": h["attempt"],
                 "Yield %": h["yield_percent"],
                 "Yield Point Change": h.get("yield_point_change", 0.0),
-                "% Increase From Previous": h.get("percent_increase_from_previous", 0.0),
+                "% Increase From Previous": h.get(
+                    "percent_increase_from_previous", 0.0
+                ),
                 "Failure Type": h["failure_type"],
                 "Agent Decision": h["recovery_reason"],
             }
@@ -883,7 +908,9 @@ def build_lab_notebook_csv(history):
             "yield_percent": h["yield_percent"],
             "true_yield_percent": h["true_yield_percent"],
             "yield_point_change": h.get("yield_point_change", 0.0),
-            "percent_increase_from_previous": h.get("percent_increase_from_previous", 0.0),
+            "percent_increase_from_previous": h.get(
+                "percent_increase_from_previous", 0.0
+            ),
             "failure_type": h["failure_type"],
             "diagnosis": h["diagnosis"],
             "recovery_reason": h["recovery_reason"],
@@ -995,9 +1022,7 @@ def show_cloud_lab_steps():
 def show_iteration_yield_graph(history, success_threshold):
     progress_df = build_iteration_progress_table(history)
 
-    chart_df = progress_df.set_index("Attempt")[
-        ["Yield %", "% Increase From Previous"]
-    ]
+    chart_df = progress_df.set_index("Attempt")[["Yield %", "% Increase From Previous"]]
 
     st.line_chart(chart_df)
 
@@ -1218,8 +1243,12 @@ with st.sidebar:
         st.write("Rows:", len(df))
         st.write("Train rows:", len(train_df))
         st.write("Mean yield:", round(float(df["yield"].mean()), 2))
-        st.write("Low yield <30%:", f"{round(float((df['yield'] < 30).mean() * 100), 2)}%")
-        st.write("High yield ≥80%:", f"{round(float((df['yield'] >= 80).mean() * 100), 2)}%")
+        st.write(
+            "Low yield <30%:", f"{round(float((df['yield'] < 30).mean() * 100), 2)}%"
+        )
+        st.write(
+            "High yield ≥80%:", f"{round(float((df['yield'] >= 80).mean() * 100), 2)}%"
+        )
     else:
         selected_aryl = "Selected substrate"
         st.warning("CSV not found. Turn on Demo mode fallback.")
@@ -1237,7 +1266,9 @@ if "importance" not in st.session_state:
     st.session_state.importance = None
 
 if run_button:
-    with st.spinner("Queuing protocol, simulating cloud lab execution, and reading yield..."):
+    with st.spinner(
+        "Queuing protocol, simulating cloud lab execution, and reading yield..."
+    ):
         time.sleep(0.8)
 
         if use_demo_mode or train_df is None:
@@ -1255,7 +1286,9 @@ if run_button:
 
 
 if st.session_state.history is None:
-    st.warning("Choose a target substrate in the sidebar, then click **Launch Cloud Lab Campaign**.")
+    st.warning(
+        "Choose a target substrate in the sidebar, then click **Launch Cloud Lab Campaign**."
+    )
     show_cloud_lab_steps()
     st.stop()
 
@@ -1393,7 +1426,9 @@ with tab1:
 
 with tab2:
     st.subheader("Protocol Diff Table")
-    st.caption("This is the main judge artifact: what changed, when it changed, and why the agent changed it.")
+    st.caption(
+        "This is the main judge artifact: what changed, when it changed, and why the agent changed it."
+    )
     show_protocol_diff(history)
 
 
@@ -1424,7 +1459,9 @@ with tab3:
                     "measured_yield_percent": h["yield_percent"],
                     "oracle_true_yield_percent": h["true_yield_percent"],
                     "yield_point_change": h.get("yield_point_change", 0.0),
-                    "percent_increase_from_previous": h.get("percent_increase_from_previous", 0.0),
+                    "percent_increase_from_previous": h.get(
+                        "percent_increase_from_previous", 0.0
+                    ),
                     "admet_status": h["admet"],
                     "ord_style_hint": h["ord_hint"],
                 }
@@ -1533,7 +1570,9 @@ with st.expander("Phase 5 Reliability Checklist", expanded=True):
     st.checkbox("No fake parameters used", value=True)
     st.checkbox("Iteration graph shows every attempt and yield increase", value=True)
     st.checkbox("Cloud lab handoff shown as protocol JSON", value=True)
-    st.checkbox("CSV/JSON exports available for Airtable or lab notebook workflow", value=True)
+    st.checkbox(
+        "CSV/JSON exports available for Airtable or lab notebook workflow", value=True
+    )
 
 
 st.success(

@@ -19,7 +19,7 @@ except Exception:
 # ============================================================
 # CONFIG
 # ============================================================
-CSV_PATH = r"C:\Users\vrush\Downloads\buchwald_hartwig_huggingface.csv"
+CSV_PATH = "buchwald_hartwig_huggingface.csv"
 
 REAL_PARAMETERS = ["ligand", "additive", "base", "aryl_halide"]
 SUCCESS_THRESHOLD = 80.0

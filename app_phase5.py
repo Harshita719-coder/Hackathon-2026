@@ -22,6 +22,31 @@ except Exception:
     OpenAI = None
     OPENAI_AVAILABLE = False
 
+try:
+    from frictionless import validate as fl_validate
+
+    FRICTIONLESS_AVAILABLE = True
+except Exception:
+    FRICTIONLESS_AVAILABLE = False
+
+try:
+    from baybe import Campaign as BaybeCampaign
+    from baybe.objectives import SingleTargetObjective
+    from baybe.parameters import CategoricalParameter
+    from baybe.searchspace import SearchSpace
+    from baybe.targets import NumericalTarget
+
+    BAYBE_AVAILABLE = True
+except Exception:
+    BAYBE_AVAILABLE = False
+
+try:
+    from rocrate.rocrate import ROCrate
+
+    ROCRATE_AVAILABLE = True
+except Exception:
+    ROCRATE_AVAILABLE = False
+
 
 # ============================================================
 # CONFIG
@@ -345,6 +370,111 @@ def show_openai_status():
         st.warning("OpenAI diagnosis: package not installed")
     else:
         st.warning("OpenAI diagnosis: local fallback")
+
+
+# ============================================================
+# FRICTIONLESS VALIDATION
+# ============================================================
+@st.cache_data
+def validate_csv_frictionless(csv_path):
+    if not FRICTIONLESS_AVAILABLE:
+        return None
+    try:
+        report = fl_validate(csv_path)
+        error_messages = []
+        try:
+            for task in report.tasks:
+                for error in task.errors[:3]:
+                    error_messages.append(str(getattr(error, "message", error)))
+        except Exception:
+            pass
+        return {"valid": report.valid, "errors": error_messages}
+    except Exception as e:
+        return {"valid": False, "errors": [str(e)]}
+
+
+# ============================================================
+# OPENAI HYPOTHESIS PARSER
+# ============================================================
+def openai_parse_hypothesis(text, aryl_options):
+    client = get_openai_client()
+    if client is None:
+        return None
+
+    sample = aryl_options[:15] if len(aryl_options) > 15 else aryl_options
+    prompt = f"""Parse this chemistry research hypothesis: "{text}"
+
+Available aryl halide substrates (choose the most relevant one or null):
+{', '.join(sample)}
+
+Respond with JSON only:
+{{"campaign_goal": "concise one-sentence goal", "suggested_aryl_halide": "exact name or null", "suggested_target_yield": 80}}"""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            max_tokens=200,
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception:
+        return None
+
+
+# ============================================================
+# OPENAI RECOVERY SUGGESTION (influences agent decisions)
+# ============================================================
+def openai_recovery_suggestion(failure_type, protocol, yield_percent, history, train_df, top_parameter):
+    """
+    Asks the LLM which parameter to change and toward what value.
+    The BayBE recovery agent uses this to prioritize candidates.
+    """
+    client = get_openai_client()
+    if client is None:
+        return None
+
+    subset = train_df[train_df["aryl_halide"] == protocol["aryl_halide"]]
+    options = {}
+    for p in ["ligand", "additive", "base"]:
+        vals = sorted(subset[p].dropna().unique().tolist())
+        options[p] = vals[:8]
+
+    history_lines = [
+        f"Attempt {h['attempt']}: {h['protocol']['ligand']}/{h['protocol']['additive']}/{h['protocol']['base']} → {h['yield_percent']}%"
+        for h in history[-3:]
+    ]
+
+    prompt = f"""You are advising a cloud lab AI on Buchwald-Hartwig reaction optimization.
+
+Current experiment:
+- yield: {yield_percent}%, failure type: {failure_type}
+- ligand: {protocol['ligand']}, additive: {protocol['additive']}, base: {protocol['base']}
+- top data lever: {top_parameter}
+
+Recent attempts: {'; '.join(history_lines)}
+
+Available options (sample):
+- ligand: {', '.join(options.get('ligand', [])[:6])}
+- additive: {', '.join(options.get('additive', [])[:6])}
+- base: {', '.join(options.get('base', [])[:6])}
+
+Respond with JSON only — suggest ONE parameter change:
+{{"parameter_to_change": "ligand|additive|base", "suggested_value": "exact name from options", "reasoning": "one sentence"}}"""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            max_tokens=150,
+        )
+        result = json.loads(response.choices[0].message.content)
+        if "parameter_to_change" in result and "suggested_value" in result:
+            return result
+        return None
+    except Exception:
+        return None
 
 
 # ============================================================
@@ -753,20 +883,103 @@ def recover_next_protocol(train_df, analyzer, current_protocol, tried_protocols)
     return best, reason
 
 
-def run_live_campaign(train_df, selected_aryl_halide, success_threshold, max_attempts):
+# ============================================================
+# BAYBE BAYESIAN OPTIMIZATION
+# ============================================================
+def build_baybe_campaign(train_df, aryl_halide):
+    if not BAYBE_AVAILABLE:
+        return None
+
+    subset = train_df[train_df["aryl_halide"] == aryl_halide]
+    if subset.empty:
+        subset = train_df
+
+    parameters = []
+    for p in ["ligand", "additive", "base"]:
+        vals = sorted(subset[p].dropna().unique().tolist())
+        if len(vals) < 2:
+            return None
+        parameters.append(CategoricalParameter(name=p, values=vals))
+
+    searchspace = SearchSpace.from_product(parameters=parameters)
+    objective = SingleTargetObjective(target=NumericalTarget(name="yield", mode="MAX"))
+    return BaybeCampaign(searchspace=searchspace, objective=objective)
+
+
+def baybe_recover_next(baybe_campaign, aryl_halide, train_df, current_protocol, tried_protocols, llm_suggestion=None):
+    tried_keys = {
+        (p["ligand"], p["additive"], p["base"])
+        for p in tried_protocols
+        if p["aryl_halide"] == aryl_halide
+    }
+
+    same_aryl = train_df[train_df["aryl_halide"] == aryl_halide]
+    if same_aryl.empty:
+        same_aryl = train_df
+    valid_combos = {
+        (str(r["ligand"]), str(r["additive"]), str(r["base"]))
+        for _, r in same_aryl.iterrows()
+    }
+
+    try:
+        recs = baybe_campaign.recommend(batch_size=20)
+
+        llm_param = llm_suggestion.get("parameter_to_change") if llm_suggestion else None
+        llm_val = llm_suggestion.get("suggested_value") if llm_suggestion else None
+
+        prioritized = []
+        remaining = []
+
+        for _, row in recs.iterrows():
+            key = (str(row["ligand"]), str(row["additive"]), str(row["base"]))
+            if key in tried_keys or key not in valid_combos:
+                continue
+            candidate = {
+                "ligand": key[0],
+                "additive": key[1],
+                "base": key[2],
+                "aryl_halide": aryl_halide,
+            }
+            if llm_param and llm_val and str(candidate.get(llm_param)) == str(llm_val):
+                prioritized.append(candidate)
+            else:
+                remaining.append(candidate)
+
+        ordered = prioritized + remaining
+        if not ordered:
+            return None, None
+
+        best = ordered[0]
+        changed = [p for p in ["ligand", "additive", "base"] if best[p] != current_protocol[p]]
+        method = "BayBE Bayesian optimization"
+        if prioritized and llm_param:
+            method += f" + LLM insight ({llm_param} → {llm_val})"
+        reason = f"{method} — changed: {', '.join(changed) or 'no parameters'}."
+        return best, reason
+
+    except Exception:
+        return None, None
+
+
+def run_live_campaign(train_df, selected_aryl_halide, success_threshold, max_attempts, convergence_mode=False, min_improvement=5.0):
     oracle = BHOracle(train_df, noise_std_percent=NOISE_STD_PERCENT)
     analyzer = SimpleAnalyzer(train_df)
     importance = analyzer.importance()
-
     top_parameter = list(importance.keys())[0] if importance else "unknown"
     current_protocol = find_starting_protocol(train_df, selected_aryl_halide)
+
+    baybe_campaign = None
+    if BAYBE_AVAILABLE:
+        try:
+            baybe_campaign = build_baybe_campaign(train_df, selected_aryl_halide)
+        except Exception:
+            baybe_campaign = None
 
     history = []
     previous_yield = None
 
     for attempt in range(1, max_attempts + 1):
         protocol_json = build_cloud_lab_protocol(attempt, current_protocol)
-
         result = oracle.query(current_protocol)
 
         failure_type = classify_failure(
@@ -777,7 +990,6 @@ def run_live_campaign(train_df, selected_aryl_halide, success_threshold, max_att
         )
 
         ord_hint = local_ord_hint(train_df, current_protocol["aryl_halide"])
-
         diagnosis = make_diagnosis(
             failure_type=failure_type,
             top_parameter=top_parameter,
@@ -786,15 +998,12 @@ def run_live_campaign(train_df, selected_aryl_halide, success_threshold, max_att
             yield_percent=result["yield_percent"],
         )
 
-        if result.get("reaction_SMILES"):
-            admet = "reaction_SMILES available; full ADMET can be added with RDKit/admet-ai."
-        else:
-            admet = "not_checked"
-
-        if result["yield_percent"] >= success_threshold:
-            cloud_status = "Target reached"
-        else:
-            cloud_status = "Result received"
+        admet = (
+            "reaction_SMILES available; full ADMET can be added with RDKit/admet-ai."
+            if result.get("reaction_SMILES")
+            else "not_checked"
+        )
+        cloud_status = "Target reached" if result["yield_percent"] >= success_threshold else "Result received"
 
         row = {
             "attempt": attempt,
@@ -805,39 +1014,93 @@ def run_live_campaign(train_df, selected_aryl_halide, success_threshold, max_att
             "failure_type": failure_type,
             "diagnosis": diagnosis,
             "recovery_reason": "Starting low-yield reaction selected from dataset.",
+            "recovery_method": "starting_point",
             "admet": admet,
             "ord_hint": ord_hint,
             "protocol_json": protocol_json,
         }
-
         history.append(row)
 
+        # Feed observation into BayBE surrogate model
+        if baybe_campaign is not None:
+            try:
+                baybe_campaign.add_measurements(
+                    pd.DataFrame([{
+                        "ligand": current_protocol["ligand"],
+                        "additive": current_protocol["additive"],
+                        "base": current_protocol["base"],
+                        "yield": result["yield_percent"],
+                    }])
+                )
+            except Exception:
+                pass
+
+        # Stop: success
         if result["yield_percent"] >= success_threshold:
-            history[-1][
-                "recovery_reason"
-            ] = "Success threshold reached. Campaign complete."
+            history[-1]["recovery_reason"] = "Success threshold reached. Campaign complete."
+            history[-1]["recovery_method"] = "success"
             break
 
+        # Stop: convergence
+        if convergence_mode and previous_yield is not None:
+            gain = result["yield_percent"] - previous_yield
+            if gain < min_improvement:
+                history[-1]["recovery_reason"] = (
+                    f"Converged: gain {gain:.1f}% < threshold {min_improvement}%. Campaign stopped early."
+                )
+                history[-1]["recovery_method"] = "convergence_stop"
+                break
+
+        # Stop: max attempts
         if attempt == max_attempts:
             history[-1]["recovery_reason"] = "Max attempts reached. Campaign stopped."
+            history[-1]["recovery_method"] = "max_attempts"
             break
 
         tried_protocols = [h["protocol"] for h in history]
 
-        next_protocol, reason = recover_next_protocol(
-            train_df=train_df,
-            analyzer=analyzer,
-            current_protocol=current_protocol,
-            tried_protocols=tried_protocols,
-        )
+        # LLM recovery suggestion (influences BayBE candidate ranking)
+        llm_suggestion = None
+        if OPENAI_AVAILABLE and get_openai_api_key():
+            try:
+                llm_suggestion = openai_recovery_suggestion(
+                    failure_type=failure_type,
+                    protocol=current_protocol,
+                    yield_percent=result["yield_percent"],
+                    history=history,
+                    train_df=train_df,
+                    top_parameter=top_parameter,
+                )
+            except Exception:
+                pass
+
+        # Primary: BayBE Bayesian optimization with LLM guidance
+        next_protocol, reason = None, None
+        if baybe_campaign is not None:
+            next_protocol, reason = baybe_recover_next(
+                baybe_campaign=baybe_campaign,
+                aryl_halide=selected_aryl_halide,
+                train_df=train_df,
+                current_protocol=current_protocol,
+                tried_protocols=tried_protocols,
+                llm_suggestion=llm_suggestion,
+            )
+
+        # Fallback: simple marginal-average method
+        if next_protocol is None:
+            next_protocol, reason = recover_next_protocol(
+                train_df=train_df,
+                analyzer=analyzer,
+                current_protocol=current_protocol,
+                tried_protocols=tried_protocols,
+            )
 
         history[-1]["recovery_reason"] = reason
-
+        history[-1]["recovery_method"] = "baybe" if baybe_campaign is not None and next_protocol is not None else "simple"
         current_protocol = next_protocol
         previous_yield = result["yield_percent"]
 
     history = add_progress_metrics(history)
-
     return history, importance
 
 
@@ -934,6 +1197,52 @@ def build_work_order_json(history):
     }
 
     return json.dumps(payload, indent=2, default=str).encode("utf-8")
+
+
+def build_rocrate_export(history, selected_aryl, success_threshold):
+    """
+    Exports the campaign as an RO-Crate zip for scientific provenance.
+    Falls back to plain JSON if rocrate is unavailable.
+    """
+    if not ROCRATE_AVAILABLE:
+        return build_work_order_json(history)
+
+    import tempfile
+
+    try:
+        crate = ROCrate()
+
+        campaign_data = {
+            "aryl_halide": selected_aryl,
+            "success_threshold": success_threshold,
+            "total_attempts": len(history),
+            "final_yield": history[-1]["yield_percent"],
+            "success": history[-1]["yield_percent"] >= success_threshold,
+            "exported_at": datetime.now().isoformat(),
+            "history": history,
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            campaign_file = tmp / "campaign.json"
+            campaign_file.write_text(json.dumps(campaign_data, indent=2, default=str))
+
+            crate.add_file(
+                str(campaign_file),
+                dest_path="campaign.json",
+                properties={
+                    "name": "Campaign History",
+                    "description": "Autonomous Buchwald-Hartwig optimization campaign log",
+                    "encodingFormat": "application/json",
+                },
+            )
+
+            zip_path = tmp / "campaign_rocrate.zip"
+            crate.write_zip(str(zip_path))
+            return zip_path.read_bytes()
+
+    except Exception:
+        return build_work_order_json(history)
 
 
 # ============================================================
@@ -1264,31 +1573,87 @@ with st.sidebar:
 
     show_openai_status()
 
+    # ── Research Hypothesis ──────────────────────────────────
+    with st.expander("Research Hypothesis", expanded=False):
+        hypothesis_text = st.text_area(
+            "Describe your experiment goal",
+            value=st.session_state.get("hypothesis_text", ""),
+            placeholder="e.g., Find optimal conditions to maximize yield for aryl bromides",
+            height=80,
+            key="hypothesis_input",
+        )
+        if hypothesis_text:
+            st.session_state["hypothesis_text"] = hypothesis_text
+
+        if OPENAI_AVAILABLE and get_openai_api_key() and hypothesis_text:
+            if st.button("Parse with AI", use_container_width=True):
+                with st.spinner("Parsing hypothesis..."):
+                    aryl_opts_for_parse = (
+                        sorted(train_df["aryl_halide"].dropna().unique().tolist())
+                        if train_df is not None
+                        else []
+                    )
+                    parsed = openai_parse_hypothesis(hypothesis_text, aryl_opts_for_parse)
+                    if parsed:
+                        st.session_state["parsed_hypothesis"] = parsed
+                        if parsed.get("suggested_aryl_halide"):
+                            st.session_state["ai_aryl"] = parsed["suggested_aryl_halide"]
+                        if parsed.get("suggested_target_yield"):
+                            st.session_state["ai_threshold"] = int(parsed["suggested_target_yield"])
+
+        if "parsed_hypothesis" in st.session_state:
+            goal = st.session_state["parsed_hypothesis"].get("campaign_goal", "")
+            st.caption(f"AI goal: {goal}")
+
     use_demo_mode = st.toggle(
         "Demo mode fallback",
         value=False,
         help="Use pre-computed results if live data or OpenAI fails.",
     )
 
+    default_threshold = st.session_state.get("ai_threshold", int(SUCCESS_THRESHOLD))
     success_threshold = st.slider(
         "Target yield %",
         min_value=50,
         max_value=95,
-        value=int(SUCCESS_THRESHOLD),
+        value=default_threshold,
         step=5,
     )
 
     max_attempts = st.slider(
         "Max autonomous attempts",
         min_value=2,
-        max_value=6,
+        max_value=10,
         value=MAX_ATTEMPTS,
         step=1,
     )
 
+    convergence_mode = st.toggle(
+        "Stop on convergence",
+        value=False,
+        help="Auto-stop when yield gain between attempts falls below the threshold.",
+    )
+    if convergence_mode:
+        min_improvement = st.slider(
+            "Min improvement per attempt (%)",
+            min_value=1.0,
+            max_value=20.0,
+            value=5.0,
+            step=1.0,
+        )
+    else:
+        min_improvement = 5.0
+
     if train_df is not None:
         aryl_options = sorted(train_df["aryl_halide"].dropna().unique().tolist())
-        selected_aryl = st.selectbox("Target substrate / aryl_halide", aryl_options)
+
+        default_aryl_idx = 0
+        if st.session_state.get("ai_aryl") in aryl_options:
+            default_aryl_idx = aryl_options.index(st.session_state["ai_aryl"])
+
+        selected_aryl = st.selectbox(
+            "Target substrate / aryl_halide", aryl_options, index=default_aryl_idx
+        )
 
         with st.expander("Dataset Health"):
             st.write("Rows:", len(df))
@@ -1300,6 +1665,25 @@ with st.sidebar:
             st.write(
                 "High yield ≥80%:", f"{round(float((df['yield'] >= 80).mean() * 100), 2)}%"
             )
+            st.divider()
+            st.markdown("**Schema Validation (Frictionless)**")
+            if FRICTIONLESS_AVAILABLE:
+                fval = validate_csv_frictionless(CSV_PATH)
+                if fval is None:
+                    st.caption("Validation unavailable.")
+                elif fval["valid"]:
+                    st.success("Schema valid — no issues found.")
+                else:
+                    st.warning(f"{len(fval['errors'])} issue(s) found")
+                    for err in fval["errors"][:3]:
+                        st.caption(err)
+            else:
+                st.caption("Install `frictionless` to enable schema validation.")
+
+            st.divider()
+            optimizer = "BayBE (Bayesian)" if BAYBE_AVAILABLE else "Simple (marginal avg)"
+            st.caption(f"Recovery optimizer: {optimizer}")
+
     else:
         selected_aryl = "Selected substrate"
         st.warning("CSV not found. Turn on Demo mode fallback.")
@@ -1331,6 +1715,8 @@ if run_button:
                 selected_aryl_halide=selected_aryl,
                 success_threshold=float(success_threshold),
                 max_attempts=int(max_attempts),
+                convergence_mode=convergence_mode,
+                min_improvement=float(min_improvement),
             )
             st.session_state.history = history
             st.session_state.importance = importance
@@ -1545,8 +1931,9 @@ with tab4:
 
     csv_bytes = build_lab_notebook_csv(history)
     json_bytes = build_work_order_json(history)
+    rocrate_bytes = build_rocrate_export(history, selected_aryl, float(success_threshold))
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
 
     with c1:
         st.download_button(
@@ -1563,6 +1950,20 @@ with tab4:
             file_name="cloud_lab_work_order.json",
             mime="application/json",
         )
+
+    with c3:
+        ro_label = "Download RO-Crate (provenance)" if ROCRATE_AVAILABLE else "Download provenance JSON"
+        ro_file = "campaign_rocrate.zip" if ROCRATE_AVAILABLE else "campaign_provenance.json"
+        ro_mime = "application/zip" if ROCRATE_AVAILABLE else "application/json"
+        st.download_button(
+            label=ro_label,
+            data=rocrate_bytes,
+            file_name=ro_file,
+            mime=ro_mime,
+        )
+
+    if not ROCRATE_AVAILABLE:
+        st.caption("Install `rocrate` to export proper RO-Crate provenance packages.")
 
     st.markdown("**Airtable-ready preview**")
     st.dataframe(

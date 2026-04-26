@@ -4,3 +4,6 @@ streamlit
 openai
 python-dotenv
 plotly
+baybe
+frictionless
+rocrate

@@ -1,3 +1,6 @@
 pandas
 numpy
-scikit-learn
+streamlit
+openai
+python-dotenv
+plotly
